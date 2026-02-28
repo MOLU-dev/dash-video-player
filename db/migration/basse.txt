@@ -1,0 +1,150 @@
+CREATE TABLE "users" (
+  "username" varchar PRIMARY KEY,
+  "hashed_password" varchar NOT NULL,
+  "full_name" varchar NOT NULL,
+  "email" varchar UNIQUE NOT NULL,
+  "password_changed_at" timestamptz NOT NULL DEFAULT ('0001-01-01 00:00:00Z'),
+  "created_at" timestamptz NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+);
+
+CREATE TABLE "accounts" (
+  "id" bigserial PRIMARY KEY,
+  "owner" varchar NOT NULL,
+  "balance" bigint NOT NULL,
+  "currency" varchar NOT NULL,
+  "created_at" timestamptz NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+);
+
+CREATE TABLE "entries" (
+  "id" bigserial PRIMARY KEY,
+  "account_id" bigint NOT NULL,
+  "amount" bigint NOT NULL,
+  "created_at" timestamptz NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+);
+
+CREATE TABLE "sessions" (
+  "id" uuid PRIMARY KEY,
+  "username" varchar NOT NULL,
+  "refresh_token" varchar NOT NULL,
+  "user_agent" varchar NOT NULL,
+  "client_ip" varchar UNIQUE NOT NULL,
+  "is_blocked" boolean NOT NULL DEFAULT false,
+  "expires_at" timestamptz NOT NULL,
+  "created_at" timestamptz NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+);
+
+CREATE TABLE "transfers" (
+  "id" bigserial PRIMARY KEY,
+  "from_account_id" bigint NOT NULL,
+  "to_account_id" bigint NOT NULL,
+  "amount" bigint NOT NULL,
+  "created_at" timestamptz NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+);
+
+COMMENT ON COLUMN "entries"."amount" IS 'can be negative or positive';
+
+COMMENT ON COLUMN "transfers"."amount" IS 'must be positive';
+
+ALTER TABLE "accounts" ADD FOREIGN KEY ("owner") REFERENCES "users" ("username");
+
+ALTER TABLE "entries" ADD FOREIGN KEY ("account_id") REFERENCES "accounts" ("id");
+
+ALTER TABLE "sessions" ADD FOREIGN KEY ("username") REFERENCES "users" ("username");
+
+ALTER TABLE "transfers" ADD FOREIGN KEY ("from_account_id") REFERENCES "accounts" ("id");
+
+ALTER TABLE "transfers" ADD FOREIGN KEY ("to_account_id") REFERENCES "accounts" ("id");
+
+
+
+
+
+CREATE TABLE "users" (
+  "id" SERIAL PRIMARY KEY,
+  "email" VARCHAR(255) UNIQUE NOT NULL,
+  "password" VARCHAR(255) NOT NULL,
+  "full_name" VARCHAR(255),
+  "phone" VARCHAR(20),
+  "created_at" TIMESTAMP DEFAULT (CURRENT_TIMESTAMP),
+  "updated_at" TIMESTAMP DEFAULT (CURRENT_TIMESTAMP)
+);
+
+CREATE TABLE "products" (
+  "id" SERIAL PRIMARY KEY,
+  "name" VARCHAR(255) NOT NULL,
+  "description" TEXT,
+  "price" DECIMAL(10,2) NOT NULL,
+  "stock" INT DEFAULT 0,
+  "category_id" INT,
+  "created_at" TIMESTAMP DEFAULT (CURRENT_TIMESTAMP),
+  "updated_at" TIMESTAMP DEFAULT (CURRENT_TIMESTAMP)
+);
+
+CREATE TABLE "categories" (
+  "id" SERIAL PRIMARY KEY,
+  "name" VARCHAR(255) UNIQUE NOT NULL,
+  "created_at" TIMESTAMP DEFAULT (CURRENT_TIMESTAMP),
+  "updated_at" TIMESTAMP DEFAULT (CURRENT_TIMESTAMP)
+);
+
+CREATE TABLE "orders" (
+  "id" SERIAL PRIMARY KEY,
+  "user_id" INT,
+  "status" VARCHAR(50) DEFAULT ('pending'),
+  "total_price" DECIMAL(10,2) NOT NULL,
+  "created_at" TIMESTAMP DEFAULT (CURRENT_TIMESTAMP),
+  "updated_at" TIMESTAMP DEFAULT (CURRENT_TIMESTAMP)
+);
+
+CREATE TABLE "order_items" (
+  "id" SERIAL PRIMARY KEY,
+  "order_id" INT,
+  "product_id" INT,
+  "quantity" INT NOT NULL,
+  "price" DECIMAL(10,2) NOT NULL
+);
+
+CREATE TABLE "payment_methods" (
+  "id" SERIAL PRIMARY KEY,
+  "user_id" INT,
+  "card_number" VARCHAR(16) NOT NULL,
+  "expiry_date" VARCHAR(7) NOT NULL,
+  "card_type" VARCHAR(50)
+);
+
+CREATE TABLE "addresses" (
+  "id" SERIAL PRIMARY KEY,
+  "user_id" INT,
+  "street" TEXT NOT NULL,
+  "city" VARCHAR(100) NOT NULL,
+  "state" VARCHAR(100),
+  "country" VARCHAR(100) NOT NULL,
+  "zip_code" VARCHAR(20) NOT NULL
+);
+
+CREATE TABLE "reviews" (
+  "id" SERIAL PRIMARY KEY,
+  "user_id" INT,
+  "product_id" INT,
+  "rating" INT NOT NULL,
+  "comment" TEXT,
+  "created_at" TIMESTAMP DEFAULT (CURRENT_TIMESTAMP)
+);
+
+COMMENT ON COLUMN "reviews"."rating" IS 'Value between 1 and 5';
+
+ALTER TABLE "products" ADD FOREIGN KEY ("category_id") REFERENCES "categories" ("id");
+
+ALTER TABLE "orders" ADD FOREIGN KEY ("user_id") REFERENCES "users" ("id");
+
+ALTER TABLE "order_items" ADD FOREIGN KEY ("order_id") REFERENCES "orders" ("id");
+
+ALTER TABLE "order_items" ADD FOREIGN KEY ("product_id") REFERENCES "products" ("id");
+
+ALTER TABLE "payment_methods" ADD FOREIGN KEY ("user_id") REFERENCES "users" ("id");
+
+ALTER TABLE "addresses" ADD FOREIGN KEY ("user_id") REFERENCES "users" ("id");
+
+ALTER TABLE "reviews" ADD FOREIGN KEY ("user_id") REFERENCES "users" ("id");
+
+ALTER TABLE "reviews" ADD FOREIGN KEY ("product_id") REFERENCES "products" ("id");

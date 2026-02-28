@@ -1,0 +1,50 @@
+package db
+
+import (
+	"context"
+	"log"
+)
+
+// CreateUserTxParams contains the parameters for creating a user with a transaction
+type CreateUserTxParams struct {
+	CreateUserParams
+	AfterCreate func(user User) error
+}
+
+// CreateUserTxResult is the result of the user creation transaction
+type CreateUserTxResult struct {
+	User User
+}
+
+// CreateUserTx performs the user creation transaction
+func (store *SQLStore) CreateUserTx(ctx context.Context, arg CreateUserTxParams) (CreateUserTxResult, error) {
+	var result CreateUserTxResult
+
+	err := store.execTx(ctx, func(q *Queries) error {
+		var err error
+
+		// Create the user
+		result.User, err = q.CreateUser(ctx, arg.CreateUserParams)
+		if err != nil {
+			log.Printf("Failed to create user: %v", err)
+			return err
+		}
+
+		// Execute callback function if provided
+		if arg.AfterCreate != nil {
+			err = arg.AfterCreate(result.User)
+			if err != nil {
+				log.Printf("AfterCreate function failed: %v", err)
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		log.Printf("Transaction failed, rolling back: %v", err)
+	}
+
+	return result, err
+}

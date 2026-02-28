@@ -1,0 +1,810 @@
+package main
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"os"
+	"os/exec"
+	"sync"
+	"time"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
+	_ "github.com/lib/pq"
+	"github.com/pion/interceptor"
+	"github.com/pion/webrtc/v3"
+	"github.com/pion/webrtc/v3/pkg/media/ivfwriter"
+	"github.com/pion/webrtc/v3/pkg/media/oggwriter"
+)
+
+type StreamManager struct {
+	db      *sql.DB
+	streams map[string]*StreamSession
+	mu      sync.RWMutex
+	api     *webrtc.API
+}
+
+type StreamSession struct {
+	ID                string
+	PeerConnection    *webrtc.PeerConnection
+	FFmpegCmd         *exec.Cmd
+	VideoWriter       *ivfwriter.IVFWriter
+	AudioWriter       *oggwriter.OggWriter
+	StartTime         time.Time
+	Status            string
+	ResourceURL       string
+	LastHeartbeat     time.Time
+	PacketLossRate    float64
+	CurrentBitrate    uint64
+	ReconnectAttempts int
+	IsRecovering      bool
+	HealthCheckTicker *time.Ticker
+	StatsCollector    chan struct{}
+}
+
+type StreamMetadata struct {
+	ID          string    `json:"id"`
+	Title       string    `json:"title"`
+	StreamKey   string    `json:"stream_key"`
+	Status      string    `json:"status"`
+	StartTime   time.Time `json:"start_time"`
+	ViewerCount int       `json:"viewer_count"`
+}
+
+type StreamHealth struct {
+	StreamID          string    `json:"stream_id"`
+	Status            string    `json:"status"`
+	ConnectionQuality string    `json:"connection_quality"`
+	PacketLoss        float64   `json:"packet_loss_percent"`
+	CurrentBitrate    int64     `json:"current_bitrate"`
+	LastHeartbeat     time.Time `json:"last_heartbeat"`
+	ReconnectAttempts int       `json:"reconnect_attempts"`
+	Uptime            int64     `json:"uptime_seconds"`
+}
+
+func NewStreamManager(dbConn string) (*StreamManager, error) {
+	db, err := sql.Open("postgres", dbConn)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := db.Ping(); err != nil {
+		return nil, err
+	}
+
+	createTableSQL := `
+	CREATE TABLE IF NOT EXISTS streams (
+		id VARCHAR(36) PRIMARY KEY,
+		title VARCHAR(255),
+		stream_key VARCHAR(255) UNIQUE,
+		status VARCHAR(50),
+		start_time TIMESTAMP,
+		end_time TIMESTAMP,
+		viewer_count INTEGER DEFAULT 0,
+		created_at TIMESTAMP DEFAULT NOW(),
+		last_heartbeat TIMESTAMP,
+		connection_quality VARCHAR(20) DEFAULT 'good',
+		packet_loss_percent DECIMAL(5,2) DEFAULT 0,
+		current_bitrate BIGINT,
+		reconnect_attempts INTEGER DEFAULT 0
+	);
+
+	CREATE TABLE IF NOT EXISTS stream_analytics (
+		id SERIAL PRIMARY KEY,
+		stream_id VARCHAR(36) REFERENCES streams(id),
+		timestamp TIMESTAMP DEFAULT NOW(),
+		viewer_count INTEGER,
+		bitrate BIGINT,
+		fps INTEGER
+	);
+
+	CREATE TABLE IF NOT EXISTS connection_logs (
+		id SERIAL PRIMARY KEY,
+		stream_id VARCHAR(36) REFERENCES streams(id),
+		event_type VARCHAR(50),
+		timestamp TIMESTAMP DEFAULT NOW(),
+		details JSONB
+	);`
+
+	if _, err := db.Exec(createTableSQL); err != nil {
+		return nil, err
+	}
+
+	m := &webrtc.MediaEngine{}
+	if err := m.RegisterDefaultCodecs(); err != nil {
+		return nil, err
+	}
+
+	i := &interceptor.Registry{}
+	if err := webrtc.RegisterDefaultInterceptors(m, i); err != nil {
+		return nil, err
+	}
+
+	api := webrtc.NewAPI(webrtc.WithMediaEngine(m), webrtc.WithInterceptorRegistry(i))
+
+	return &StreamManager{
+		db:      db,
+		streams: make(map[string]*StreamSession),
+		api:     api,
+	}, nil
+}
+
+func (sm *StreamManager) HandleWHIP(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		http.Error(w, "Authorization required", http.StatusUnauthorized)
+		return
+	}
+
+	streamKey := ""
+	if len(authHeader) > 7 && authHeader[:7] == "Bearer " {
+		streamKey = authHeader[7:]
+	} else {
+		http.Error(w, "Invalid authorization format", http.StatusUnauthorized)
+		return
+	}
+
+	var streamID string
+	err := sm.db.QueryRow("SELECT id FROM streams WHERE stream_key = $1 AND status = 'ready'",
+		streamKey).Scan(&streamID)
+	if err != nil {
+		log.Printf("Invalid stream key: %s, error: %v", streamKey, err)
+		http.Error(w, "Invalid stream key or stream not ready", http.StatusUnauthorized)
+		return
+	}
+
+	offerBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read offer", http.StatusBadRequest)
+		return
+	}
+
+	offer := webrtc.SessionDescription{
+		Type: webrtc.SDPTypeOffer,
+		SDP:  string(offerBytes),
+	}
+
+	config := webrtc.Configuration{
+		ICEServers: []webrtc.ICEServer{
+			{URLs: []string{"stun:stun.l.google.com:19302"}},
+		},
+	}
+
+	pc, err := sm.api.NewPeerConnection(config)
+	if err != nil {
+		http.Error(w, "Failed to create peer connection", http.StatusInternalServerError)
+		return
+	}
+
+	outputDir := fmt.Sprintf("./streams/%s", streamID)
+	os.MkdirAll(outputDir, 0755)
+
+	videoFile := fmt.Sprintf("%s/input.ivf", outputDir)
+	audioFile := fmt.Sprintf("%s/input.ogg", outputDir)
+
+	videoWriter, err := ivfwriter.New(videoFile)
+	if err != nil {
+		http.Error(w, "Failed to create video writer", http.StatusInternalServerError)
+		return
+	}
+
+	audioWriter, err := oggwriter.New(audioFile, 48000, 2)
+	if err != nil {
+		videoWriter.Close()
+		http.Error(w, "Failed to create audio writer", http.StatusInternalServerError)
+		return
+	}
+
+	session := &StreamSession{
+		ID:             streamID,
+		PeerConnection: pc,
+		VideoWriter:    videoWriter,
+		AudioWriter:    audioWriter,
+		StartTime:      time.Now(),
+		Status:         "connecting",
+		StatsCollector: make(chan struct{}),
+	}
+
+	pc.OnTrack(func(track *webrtc.TrackRemote, receiver *webrtc.RTPReceiver) {
+		codec := track.Codec()
+		log.Printf("Track received - Kind: %s, Codec: %s, PayloadType: %d",
+			track.Kind(), codec.MimeType, codec.PayloadType)
+
+		if track.Kind() == webrtc.RTPCodecTypeVideo {
+			go sm.handleVideoTrack(track, session, outputDir)
+		} else if track.Kind() == webrtc.RTPCodecTypeAudio {
+			go sm.handleAudioTrack(track, session, outputDir)
+		}
+	})
+
+	pc.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
+		log.Printf("Stream %s connection state: %s", streamID, state.String())
+
+		switch state {
+		case webrtc.PeerConnectionStateConnected:
+			_, err := sm.db.Exec(`
+				UPDATE streams 
+				SET status = 'live', 
+					start_time = $1, 
+					last_heartbeat = $1,
+					reconnect_attempts = 0 
+				WHERE id = $2`,
+				time.Now(), streamID)
+			if err != nil {
+				log.Printf("Failed to update stream status: %v", err)
+			}
+
+			sm.logConnectionEvent(streamID, "connected", map[string]interface{}{
+				"timestamp": time.Now(),
+			})
+
+			go sm.startFFmpegTranscoding(streamID, outputDir)
+			go sm.monitorStreamHealth(streamID, session)
+
+		case webrtc.PeerConnectionStateConnecting:
+			sm.db.Exec("UPDATE streams SET status = 'connecting' WHERE id = $1", streamID)
+
+		case webrtc.PeerConnectionStateDisconnected:
+			sm.handleDisconnection(streamID, session)
+
+		case webrtc.PeerConnectionStateFailed:
+			sm.db.Exec(`
+				UPDATE streams 
+				SET status = 'failed', 
+					end_time = $1 
+				WHERE id = $2`,
+				time.Now(), streamID)
+			sm.logConnectionEvent(streamID, "failed", nil)
+			sm.StopStream(streamID)
+
+		case webrtc.PeerConnectionStateClosed:
+			sm.db.Exec(`
+				UPDATE streams 
+				SET status = 'ended', 
+					end_time = $1 
+				WHERE id = $2`,
+				time.Now(), streamID)
+			sm.logConnectionEvent(streamID, "closed", nil)
+			sm.StopStream(streamID)
+		}
+	})
+
+	pc.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		log.Printf("Stream %s ICE state: %s", streamID, state.String())
+
+		switch state {
+		case webrtc.ICEConnectionStateDisconnected:
+			sm.db.Exec("UPDATE streams SET connection_quality = 'poor' WHERE id = $1", streamID)
+		case webrtc.ICEConnectionStateFailed:
+			sm.db.Exec("UPDATE streams SET connection_quality = 'failed' WHERE id = $1", streamID)
+		case webrtc.ICEConnectionStateConnected:
+			sm.db.Exec("UPDATE streams SET connection_quality = 'good' WHERE id = $1", streamID)
+		}
+	})
+
+	if err := pc.SetRemoteDescription(offer); err != nil {
+		http.Error(w, "Failed to set remote description", http.StatusInternalServerError)
+		return
+	}
+
+	answer, err := pc.CreateAnswer(nil)
+	if err != nil {
+		http.Error(w, "Failed to create answer", http.StatusInternalServerError)
+		return
+	}
+
+	if err := pc.SetLocalDescription(answer); err != nil {
+		http.Error(w, "Failed to set local description", http.StatusInternalServerError)
+		return
+	}
+
+	resourceURL := fmt.Sprintf("/whip/%s", streamID)
+	session.ResourceURL = resourceURL
+
+	sm.mu.Lock()
+	sm.streams[streamID] = session
+	sm.mu.Unlock()
+
+	w.Header().Set("Content-Type", "application/sdp")
+	w.Header().Set("Location", resourceURL)
+	w.WriteHeader(http.StatusCreated)
+	w.Write([]byte(answer.SDP))
+}
+
+func (sm *StreamManager) handleVideoTrack(track *webrtc.TrackRemote, session *StreamSession, outputDir string) {
+	defer session.VideoWriter.Close()
+
+	for {
+		rtpPacket, _, err := track.ReadRTP()
+		if err != nil {
+			log.Println("Video track read error:", err)
+			return
+		}
+
+		if err := session.VideoWriter.WriteRTP(rtpPacket); err != nil {
+			log.Println("Video write error:", err)
+			return
+		}
+	}
+}
+
+func (sm *StreamManager) handleAudioTrack(track *webrtc.TrackRemote, session *StreamSession, outputDir string) {
+	defer session.AudioWriter.Close()
+
+	for {
+		rtpPacket, _, err := track.ReadRTP()
+		if err != nil {
+			log.Println("Audio track read error:", err)
+			return
+		}
+
+		if err := session.AudioWriter.WriteRTP(rtpPacket); err != nil {
+			log.Println("Audio write error:", err)
+			return
+		}
+	}
+}
+
+func (sm *StreamManager) monitorStreamHealth(streamID string, session *StreamSession) {
+	ticker := time.NewTicker(5 * time.Second)
+	session.HealthCheckTicker = ticker
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			sm.updateStreamStats(streamID, session)
+		case <-session.StatsCollector:
+			return
+		}
+	}
+}
+
+func (sm *StreamManager) updateStreamStats(streamID string, session *StreamSession) {
+	if session.PeerConnection == nil {
+		return
+	}
+
+	stats := session.PeerConnection.GetStats()
+
+	var totalPacketsLost uint64
+	var totalPacketsReceived uint64
+	var currentBitrate uint64
+
+	for _, stat := range stats {
+		switch s := stat.(type) {
+		case *webrtc.InboundRTPStreamStats:
+			totalPacketsLost += s.PacketsLost
+			totalPacketsReceived += s.PacketsReceived
+			currentBitrate += s.BytesReceived * 8 / 5
+		}
+	}
+
+	var packetLossPercent float64
+	if totalPacketsReceived > 0 {
+		packetLossPercent = (float64(totalPacketsLost) / float64(totalPacketsReceived+totalPacketsLost)) * 100
+	}
+
+	session.LastHeartbeat = time.Now()
+	session.PacketLossRate = packetLossPercent
+	session.CurrentBitrate = currentBitrate
+
+	quality := "good"
+	if packetLossPercent > 10 {
+		quality = "poor"
+	} else if packetLossPercent > 5 {
+		quality = "fair"
+	}
+
+	_, err := sm.db.Exec(`
+		UPDATE streams 
+		SET last_heartbeat = $1,
+			connection_quality = $2,
+			packet_loss_percent = $3,
+			current_bitrate = $4
+		WHERE id = $5`,
+		time.Now(), quality, packetLossPercent, currentBitrate, streamID)
+
+	if err != nil {
+		log.Printf("Failed to update stream stats: %v", err)
+	}
+
+	sm.db.Exec(`
+		INSERT INTO stream_analytics (stream_id, bitrate, fps)
+		VALUES ($1, $2, $3)`,
+		streamID, currentBitrate, 30)
+
+	if quality == "poor" {
+		log.Printf("⚠️  Stream %s has poor connection quality (packet loss: %.2f%%)",
+			streamID, packetLossPercent)
+		sm.logConnectionEvent(streamID, "quality_degraded", map[string]interface{}{
+			"packet_loss": packetLossPercent,
+			"bitrate":     currentBitrate,
+		})
+	}
+}
+
+func (sm *StreamManager) handleDisconnection(streamID string, session *StreamSession) {
+	sm.mu.Lock()
+	session.IsRecovering = true
+	session.ReconnectAttempts++
+	attempts := session.ReconnectAttempts
+	sm.mu.Unlock()
+
+	log.Printf("🔄 Stream %s disconnected, attempting recovery (attempt %d)", streamID, attempts)
+
+	sm.db.Exec(`
+		UPDATE streams 
+		SET status = 'reconnecting',
+			reconnect_attempts = $1 
+		WHERE id = $2`,
+		attempts, streamID)
+
+	sm.logConnectionEvent(streamID, "reconnecting", map[string]interface{}{
+		"attempt": attempts,
+	})
+
+	time.Sleep(30 * time.Second)
+
+	sm.mu.RLock()
+	currentSession, exists := sm.streams[streamID]
+	sm.mu.RUnlock()
+
+	if !exists || currentSession.PeerConnection.ConnectionState() != webrtc.PeerConnectionStateConnected {
+		if attempts >= 3 {
+			log.Printf("❌ Stream %s failed after %d reconnection attempts", streamID, attempts)
+			sm.db.Exec(`
+				UPDATE streams 
+				SET status = 'failed', 
+					end_time = $1 
+				WHERE id = $2`,
+				time.Now(), streamID)
+			sm.logConnectionEvent(streamID, "failed_max_retries", map[string]interface{}{
+				"attempts": attempts,
+			})
+			sm.StopStream(streamID)
+		}
+	} else {
+		log.Printf("✅ Stream %s reconnected successfully", streamID)
+		sm.mu.Lock()
+		session.IsRecovering = false
+		sm.mu.Unlock()
+
+		sm.db.Exec("UPDATE streams SET status = 'live' WHERE id = $1", streamID)
+		sm.logConnectionEvent(streamID, "reconnected", nil)
+	}
+}
+
+func (sm *StreamManager) logConnectionEvent(streamID, eventType string, details map[string]interface{}) {
+	detailsJSON, _ := json.Marshal(details)
+	sm.db.Exec(`
+		INSERT INTO connection_logs (stream_id, event_type, details)
+		VALUES ($1, $2, $3)`,
+		streamID, eventType, detailsJSON)
+}
+
+func (sm *StreamManager) startFFmpegTranscoding(streamID, outputDir string) {
+	videoFile := fmt.Sprintf("%s/input.ivf", outputDir)
+	audioFile := fmt.Sprintf("%s/input.ogg", outputDir)
+
+	time.Sleep(2 * time.Second)
+
+	var quality string
+	sm.db.QueryRow("SELECT COALESCE(connection_quality, 'good') FROM streams WHERE id = $1", streamID).Scan(&quality)
+
+	preset := "veryfast"
+	if quality == "poor" {
+		preset = "ultrafast"
+	}
+
+	cmd := exec.Command("ffmpeg",
+		"-re",
+		"-i", videoFile,
+		"-i", audioFile,
+		"-c:v", "libx264",
+		"-preset", preset,
+		"-tune", "zerolatency",
+		"-g", "60",
+		"-keyint_min", "60",
+		"-sc_threshold", "0",
+		"-profile:v", "high",
+		"-level", "4.0",
+		"-c:a", "aac",
+		"-b:a", "128k",
+		"-ar", "48000",
+		"-ac", "2",
+		"-map", "0:v:0", "-map", "1:a:0",
+		"-s:v:0", "1920x1080", "-b:v:0", "5000k", "-maxrate:v:0", "5350k", "-bufsize:v:0", "10000k",
+		"-map", "0:v:0", "-map", "1:a:0",
+		"-s:v:1", "1280x720", "-b:v:1", "2800k", "-maxrate:v:1", "2996k", "-bufsize:v:1", "5600k",
+		"-map", "0:v:0", "-map", "1:a:0",
+		"-s:v:2", "854x480", "-b:v:2", "1400k", "-maxrate:v:2", "1498k", "-bufsize:v:2", "2800k",
+		"-map", "0:v:0", "-map", "1:a:0",
+		"-s:v:3", "640x360", "-b:v:3", "600k", "-maxrate:v:3", "642k", "-bufsize:v:3", "1200k",
+		"-map", "0:v:0", "-map", "1:a:0",
+		"-s:v:4", "426x240", "-b:v:4", "300k", "-maxrate:v:4", "321k", "-bufsize:v:4", "600k",
+		"-f", "dash",
+		"-seg_duration", "2",
+		"-use_template", "1",
+		"-use_timeline", "1",
+		"-streaming", "1",
+		"-ldash", "1",
+		"-window_size", "5",
+		"-extra_window_size", "10",
+		"-adaptation_sets", "id=0,streams=v id=1,streams=a",
+		"-utc_timing_url", "https://time.akamai.com/?iso",
+		fmt.Sprintf("%s/manifest.mpd", outputDir),
+	)
+
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	log.Printf("Starting FFmpeg DASH transcoding for stream %s", streamID)
+	if err := cmd.Start(); err != nil {
+		log.Printf("FFmpeg start error: %v", err)
+		return
+	}
+
+	sm.mu.Lock()
+	if session, exists := sm.streams[streamID]; exists {
+		session.FFmpegCmd = cmd
+	}
+	sm.mu.Unlock()
+
+	cmd.Wait()
+}
+
+func (sm *StreamManager) HandleWHIPDelete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "DELETE" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	vars := mux.Vars(r)
+	streamID := vars["id"]
+
+	sm.StopStream(streamID)
+	w.WriteHeader(http.StatusOK)
+}
+
+func (sm *StreamManager) StopStream(streamID string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	session, exists := sm.streams[streamID]
+	if !exists {
+		return
+	}
+
+	log.Printf("Stopping stream %s", streamID)
+
+	if session.StatsCollector != nil {
+		close(session.StatsCollector)
+	}
+	if session.HealthCheckTicker != nil {
+		session.HealthCheckTicker.Stop()
+	}
+	if session.PeerConnection != nil {
+		session.PeerConnection.Close()
+	}
+	if session.VideoWriter != nil {
+		session.VideoWriter.Close()
+	}
+	if session.AudioWriter != nil {
+		session.AudioWriter.Close()
+	}
+	if session.FFmpegCmd != nil && session.FFmpegCmd.Process != nil {
+		session.FFmpegCmd.Process.Kill()
+	}
+
+	sm.db.Exec("UPDATE streams SET status = 'ended', end_time = $1 WHERE id = $2",
+		time.Now(), streamID)
+
+	delete(sm.streams, streamID)
+}
+
+func (sm *StreamManager) CreateStream(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Title string `json:"title"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	streamID := uuid.New().String()
+	streamKey := uuid.New().String()
+
+	_, err := sm.db.Exec(
+		"INSERT INTO streams (id, title, stream_key, status) VALUES ($1, $2, $3, 'ready')",
+		streamID, req.Title, streamKey,
+	)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+
+	response := map[string]string{
+		"stream_id":  streamID,
+		"stream_key": streamKey,
+		"whip_url":   "http://localhost:8080/whip",
+		"play_url":   fmt.Sprintf("http://localhost:8080/streams/%s/manifest.mpd", streamID),
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+func (sm *StreamManager) GetStream(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	streamID := vars["id"]
+
+	var metadata StreamMetadata
+	err := sm.db.QueryRow(
+		"SELECT id, title, stream_key, status, COALESCE(start_time, NOW()), viewer_count FROM streams WHERE id = $1",
+		streamID,
+	).Scan(&metadata.ID, &metadata.Title, &metadata.StreamKey, &metadata.Status,
+		&metadata.StartTime, &metadata.ViewerCount)
+
+	if err != nil {
+		http.Error(w, "Stream not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(metadata)
+}
+
+func (sm *StreamManager) ListStreams(w http.ResponseWriter, r *http.Request) {
+	rows, err := sm.db.Query(
+		"SELECT id, title, status, COALESCE(start_time, NOW()), viewer_count FROM streams ORDER BY created_at DESC LIMIT 50",
+	)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	var streams []StreamMetadata
+	for rows.Next() {
+		var s StreamMetadata
+		if err := rows.Scan(&s.ID, &s.Title, &s.Status, &s.StartTime, &s.ViewerCount); err != nil {
+			continue
+		}
+		streams = append(streams, s)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(streams)
+}
+
+func (sm *StreamManager) GetStreamHealth(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	streamID := vars["id"]
+
+	var health StreamHealth
+	var startTime time.Time
+	err := sm.db.QueryRow(`
+		SELECT status, 
+			   COALESCE(connection_quality, 'unknown'),
+			   COALESCE(packet_loss_percent, 0),
+			   COALESCE(current_bitrate, 0),
+			   COALESCE(last_heartbeat, NOW()),
+			   COALESCE(reconnect_attempts, 0),
+			   COALESCE(start_time, NOW())
+		FROM streams 
+		WHERE id = $1`, streamID).Scan(
+		&health.Status,
+		&health.ConnectionQuality,
+		&health.PacketLoss,
+		&health.CurrentBitrate,
+		&health.LastHeartbeat,
+		&health.ReconnectAttempts,
+		&startTime,
+	)
+
+	if err != nil {
+		http.Error(w, "Stream not found", http.StatusNotFound)
+		return
+	}
+
+	health.StreamID = streamID
+	if health.Status == "live" {
+		health.Uptime = int64(time.Since(startTime).Seconds())
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(health)
+}
+
+func (sm *StreamManager) cleanupStaleStreams() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		rows, err := sm.db.Query(`
+			SELECT id 
+			FROM streams 
+			WHERE status = 'live' 
+			AND last_heartbeat < NOW() - INTERVAL '60 seconds'`)
+
+		if err != nil {
+			log.Printf("Cleanup query error: %v", err)
+			continue
+		}
+
+		var staleStreams []string
+		for rows.Next() {
+			var streamID string
+			if err := rows.Scan(&streamID); err == nil {
+				staleStreams = append(staleStreams, streamID)
+			}
+		}
+		rows.Close()
+
+		for _, streamID := range staleStreams {
+			log.Printf("🧹 Cleaning up stale stream: %s", streamID)
+			sm.db.Exec(`
+				UPDATE streams 
+				SET status = 'timeout', 
+					end_time = NOW() 
+				WHERE id = $1`, streamID)
+			sm.logConnectionEvent(streamID, "timeout", nil)
+			sm.StopStream(streamID)
+		}
+	}
+}
+
+func main() {
+	dbConn := "postgres://user:password@localhost/streaming?sslmode=disable"
+	sm, err := NewStreamManager(dbConn)
+	if err != nil {
+		log.Fatal("Failed to initialize:", err)
+	}
+	defer sm.db.Close()
+
+	go sm.cleanupStaleStreams()
+
+	r := mux.NewRouter()
+
+	r.HandleFunc("/whip", sm.HandleWHIP).Methods("POST", "OPTIONS")
+	r.HandleFunc("/whip/{id}", sm.HandleWHIPDelete).Methods("DELETE")
+
+	r.HandleFunc("/api/streams", sm.CreateStream).Methods("POST")
+	r.HandleFunc("/api/streams", sm.ListStreams).Methods("GET")
+	r.HandleFunc("/api/streams/{id}", sm.GetStream).Methods("GET")
+	r.HandleFunc("/api/streams/{id}/health", sm.GetStreamHealth).Methods("GET")
+
+	r.PathPrefix("/streams/").Handler(
+		http.StripPrefix("/streams/", http.FileServer(http.Dir("./streams"))),
+	)
+
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+			w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, DELETE")
+			w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Range")
+			w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range")
+			if r.Method == "OPTIONS" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	log.Println("🚀 WHIP Server starting on :8080")
+	log.Println("📡 WHIP endpoint: http://localhost:8080/whip")
+	log.Println("💚 Health monitoring enabled")
+	log.Fatal(http.ListenAndServe(":8080", r))
+}
