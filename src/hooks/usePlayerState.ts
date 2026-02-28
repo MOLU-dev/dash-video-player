@@ -4,6 +4,7 @@ import type {
   PlayerStats,
   QualityInfo,
   BOLAState,
+  EnhancedBOLAState,
   PendingQualitySwitch,
   PendingAppend,
   OperationQueue,
@@ -82,11 +83,7 @@ export function usePlayerState() {
   const evictionIntervalRef = useRef<number | null>(null);
 
   // Refs for BOLA
-  const bolaStateRef = useRef<BOLAState>({
-    vp: 0,
-    gp: 0,
-    utilities: [],
-  });
+  const bolaStateRef = useRef<EnhancedBOLAState | null>(null);
 
   // Refs for buffer management
   const targetBufferLevelRef = useRef(TARGET_BUFFER_LEVEL);

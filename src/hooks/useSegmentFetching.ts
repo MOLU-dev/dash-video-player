@@ -108,6 +108,7 @@ interface UseSegmentFetchingProps {
 
   prefetchMetadata?: Map<string, PrefetchMetadata>;
   isLiveRef?: React.RefObject<boolean>;
+  qualitySwitchInProgressRef: React.RefObject<boolean>;
 }
 
 export function useSegmentFetching({
@@ -149,6 +150,7 @@ export function useSegmentFetching({
 
   prefetchMetadata = new Map(),
   isLiveRef = { current: false },
+  qualitySwitchInProgressRef,
 }: UseSegmentFetchingProps) {
   const segmentCache = getSegmentCache();
   const { getPrefetchInfo } = usePrefetchAwareSegmentFetching(
@@ -710,8 +712,8 @@ export function useSegmentFetching({
                isFetchingAudioRef.current = false;
              }
              
-             // Restart the persistent stream if still live
-             if (isLiveRef.current) {
+             // Restart the persistent stream if still live and not switching quality
+             if (isLiveRef.current && !qualitySwitchInProgressRef.current) {
                 fetchNextSegment(videoId, rep, mediaType, sb, nextSegRef, finishedRef, false);
              }
           },
@@ -728,11 +730,13 @@ export function useSegmentFetching({
                isFetchingAudioRef.current = false;
              }
 
-             // Retry after delay
-             if (isLiveRef.current && !controller.signal.aborted) {
+             // Retry after delay if not switching quality
+             if (isLiveRef.current && !controller.signal.aborted && !qualitySwitchInProgressRef.current) {
                 console.log(`[${mediaType}] Retrying persistent stream from ${nextSegRef.current}...`);
                 setTimeout(() => {
-                   fetchNextSegment(videoId, rep, mediaType, sb, nextSegRef, finishedRef, false);
+                   if (!qualitySwitchInProgressRef.current) {
+                      fetchNextSegment(videoId, rep, mediaType, sb, nextSegRef, finishedRef, false);
+                   }
                 }, 2000); 
              }
           }

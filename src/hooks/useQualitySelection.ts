@@ -2,6 +2,7 @@ import { useCallback, useEffect } from "react";
 import type {
   Representation,
   BOLAState,
+  EnhancedBOLAState,
   PendingAppend,
   MediaType,
 } from "../types/player.types";
@@ -48,7 +49,7 @@ interface UseQualitySelectionProps {
   isInOnlineRecoveryRef: React.RefObject<boolean>;
   lastOnlineTimeRef: React.RefObject<number>;
   isInEmergencyModeRef: React.RefObject<boolean>;
-  bolaStateRef: React.RefObject<BOLAState>;
+  bolaStateRef: React.RefObject<EnhancedBOLAState | null>;
   targetBufferLevelRef: React.RefObject<number>;
   setUiVideoQualityIdx: React.Dispatch<React.SetStateAction<number>>;
   setCurrentStats: React.Dispatch<React.SetStateAction<any>>;
@@ -75,6 +76,7 @@ interface UseQualitySelectionProps {
   calculateEstimatedBufferEnd: () => number;
   videoId: string;
   isPausedRef: React.RefObject<boolean>;
+  isLiveRef: React.RefObject<boolean>; // Added
 }
 
 export function useQualitySelection({
@@ -113,6 +115,7 @@ export function useQualitySelection({
   videoId,
   isPausedRef,
   audioFinishedRef,
+  isLiveRef, // Added
 }: UseQualitySelectionProps) {
   const shouldAllowQualitySwitch = useCallback(
     (context: string = "general"): boolean => {
@@ -166,11 +169,13 @@ export function useQualitySelection({
       const estimatedBufferEnd = calculateEstimatedBufferEnd();
       const bufferGap = estimatedBufferEnd - videoEl.currentTime;
 
-      if (bufferGap < BUFFER_MIN_SWITCH_THRESHOLD) {
+      const threshold = isLiveRef.current ? 2 : BUFFER_MIN_SWITCH_THRESHOLD;
+
+      if (bufferGap < threshold) {
         // console.log(
         //   `[${context}] Blocking: buffer gap ${bufferGap.toFixed(
         //     1
-        //   )}s below minimum threshold ${BUFFER_MIN_SWITCH_THRESHOLD}s`
+        //   )}s below minimum threshold ${threshold}s`
         // );
         return false;
       }
@@ -268,26 +273,33 @@ export function useQualitySelection({
         cancelAllSegmentRequests("video", currentRep.id);
         await completeOngoingSegmentOperations("video");
 
-        const currentTime = videoEl.currentTime;
-        const bufferEnd =
-          videoEl.buffered.length > 0
-            ? videoEl.buffered.end(videoEl.buffered.length - 1)
-            : 0;
+        let newSegmentNum = 0;
+        
+        if (isLiveRef.current) {
+          // For Live, we just continue from the next expected segment
+          newSegmentNum = videoNextSegRef.current;
+        } else {
+          const currentTime = videoEl.currentTime;
+          const bufferEnd =
+            videoEl.buffered.length > 0
+              ? videoEl.buffered.end(videoEl.buffered.length - 1)
+              : 0;
 
-        const resumeTime = Math.max(currentTime, bufferEnd);
-        const newSegmentDuration = newRep.segmentDur / newRep.timescale;
-        const segmentIndex = Math.floor(resumeTime / newSegmentDuration);
-        let newSegmentNum = newRep.startNumber + segmentIndex;
+          const resumeTime = Math.max(currentTime, bufferEnd);
+          const newSegmentDuration = newRep.segmentDur / newRep.timescale;
+          const segmentIndex = Math.floor(resumeTime / newSegmentDuration);
+          newSegmentNum = newRep.startNumber + segmentIndex;
 
-        newSegmentNum = Math.min(
-          newSegmentNum,
-          newRep.startNumber + newRep.totalSegments - 1
-        );
+          newSegmentNum = Math.min(
+            newSegmentNum,
+            newRep.startNumber + newRep.totalSegments - 1
+          );
 
-        const lastProcessed =
-          lastProcessedSegmentsRef.current.get(newRep.id) ||
-          newRep.startNumber - 1;
-        newSegmentNum = Math.max(newSegmentNum, lastProcessed + 1);
+          const lastProcessed =
+            lastProcessedSegmentsRef.current.get(newRep.id) ||
+            newRep.startNumber - 1;
+          newSegmentNum = Math.max(newSegmentNum, lastProcessed + 1);
+        }
 
         if (!videoInitSegmentCache.current.has(newRep.id)) {
           const initSegment = await fetchInitSegment(videoId, newRep, "video");
@@ -413,6 +425,7 @@ export function useQualitySelection({
       enqueueOperation,
       fetchNextSegment,
       videoId,
+      isLiveRef,
     ]
   );
 
@@ -426,6 +439,12 @@ export function useQualitySelection({
     }
 
     const currentIdx = videoQualityIdxRef.current;
+    
+    // Safety check for BOLA state
+    if (!bolaStateRef.current) {
+      return currentIdx;
+    }
+
     const estimatedBufferEnd = calculateEstimatedBufferEnd();
     const bufferLevel = estimatedBufferEnd - videoRef.current.currentTime;
 

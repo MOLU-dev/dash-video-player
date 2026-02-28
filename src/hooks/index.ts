@@ -302,6 +302,7 @@ export function useGrpcPlayer({
     audioSbRef,
     prefetchMetadata,
     isLiveRef,
+    qualitySwitchInProgressRef,
   });
 
   // Quality selection
@@ -343,6 +344,7 @@ export function useGrpcPlayer({
       videoId,
       audioFinishedRef,
       isPausedRef,
+      isLiveRef,
     });
 
   // Player initializer - pass prefetchMetadata
@@ -546,6 +548,7 @@ export function useGrpcPlayer({
     prefetchMetadata,
     isLiveRef,
     setIsLive,
+    targetBufferLevelRef,
     hasPlaybackStarted,
     setHasPlaybackStarted,
   });

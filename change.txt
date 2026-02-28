@@ -1,0 +1,32 @@
+# Live Stream & ABR Enhancement Log
+
+## 1. Proto & Service Layer
+- **Location**: `src/proto/`
+    - Injected updated protobuf definitions supporting `StreamVideoLive` RPC.
+- **Location**: `src/services/segmentFetcher.ts`
+    - Implemented `streamLivePersistent`: A new gRPC-web call that uses a long-lived connection to "push" segments from the server.
+    - Added support for `isLastChunk` tracking to identify segment boundaries within the persistent stream.
+
+## 2. Segment Fetching Logic
+- **Location**: `src/hooks/useSegmentFetching.ts`
+    - Migrated Live mode to use the persistent "push" stream instead of polling.
+    - Added `qualitySwitchInProgressRef` as a guard: This prevents the player from restarting an old quality stream if the user (or ABR) triggers a quality switch.
+    - Optimized chunk appending to MSE (Media Source Extensions) for immediate playback upon arrival.
+
+## 3. Adaptive Bitrate (ABR) for Live
+- **Location**: `src/hooks/useQualitySelection.ts`
+    - Added **Live ABR Support**: Lowered the "Buffer Ahead" switch threshold from 6 seconds to **2 seconds** for live streams.
+    - Seamless Handoff: Modified `switchQuality` to carry over the next segment number without gaps when switching bitrate during a live session.
+    - Integrated `EnhancedBOLAState` for more precise utility calculations.
+
+## 4. Player Initialization & State
+- **Location**: `src/hooks/core/usePlayerInitializer.ts`
+    - Implemented live-specific target buffer logic: Set `targetBufferLevel` to **5 seconds** for Live (vs 60s for VOD) to prevent unnecessary downswitching.
+- **Location**: `src/hooks/usePlayerState.ts`
+    - Upgraded `bolaStateRef` to `EnhancedBOLAState` to track more detailed network metrics.
+- **Location**: `src/hooks/index.ts`
+    - Wired new refs (`isLiveRef`, `qualitySwitchInProgressRef`, `targetBufferLevelRef`) through the hook hierarchy to sync ABR and Fetching layers.
+
+## 5. Types
+- **Location**: `src/types/player.types.ts`
+    - Defined `EnhancedBOLAState` interface.

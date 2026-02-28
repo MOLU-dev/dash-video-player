@@ -50,7 +50,8 @@ interface UsePlayerInitializerProps {
   isInOnlineRecoveryRef: React.RefObject<boolean>;
   isOnlineRef: React.RefObject<boolean>;
   evictionIntervalRef: React.RefObject<number | null>;
-  bolaStateRef: React.RefObject<BOLAState | EnhancedBOLAState | null>;
+  bolaStateRef: React.RefObject<EnhancedBOLAState | null>;
+  targetBufferLevelRef: React.RefObject<number>;
   videoInitSegmentCache: React.RefObject<Map<string, Uint8Array>>;
   audioInitSegmentCache: React.RefObject<Map<string, Uint8Array>>;
   currentVideoInitSegmentRef: React.RefObject<Uint8Array | null>;
@@ -150,6 +151,7 @@ export function usePlayerInitializer({
   savedPosition = null,
   isLiveRef,
   setIsLive,
+  targetBufferLevelRef,
   hasPlaybackStarted,
   setHasPlaybackStarted,
 }: UsePlayerInitializerProps) {
@@ -202,8 +204,16 @@ export function usePlayerInitializer({
            setIsLive(isLive);
            if (isLive) setHasPlaybackStarted(true);
 
-           const bolaState = initializeBOLA(videoRepsArr);
-           bolaStateRef.current = bolaState;
+            const bolaState = initializeBOLA(videoRepsArr);
+            bolaStateRef.current = bolaState;
+
+            // For live streams, we use a much smaller target buffer for BOLA
+            // because keeping 60s of buffer is impossible in live
+            if (isLive) {
+              targetBufferLevelRef.current = 5; // 5s target for live
+            } else {
+              targetBufferLevelRef.current = 60; // 60s target for VOD
+            }
 
            setVideoReps(videoRepsArr);
            videoRepsRef.current = videoRepsArr;
