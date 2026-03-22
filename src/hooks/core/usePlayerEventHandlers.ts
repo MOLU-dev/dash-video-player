@@ -102,6 +102,7 @@ interface UsePlayerEventHandlersProps {
     isPredictedStall?: boolean;
   };
   isLiveRef: React.RefObject<boolean>;
+  targetBufferLevelRef: React.RefObject<number>;
   scheduleNextFetch: (
     mediaType: "video" | "audio",
     delay: number,
@@ -181,6 +182,7 @@ export function usePlayerEventHandlers({
   triggerStallRecovery,
   clearStallRecovery,
   isLiveRef,
+  targetBufferLevelRef,
 }: UsePlayerEventHandlersProps) {
   // Track playhead velocity for predictive stall detection
   const playheadVelocityRef = useRef<{
@@ -332,25 +334,46 @@ export function usePlayerEventHandlers({
       };
     }
 
+    // --- DYNAMIC THRESHOLDS ---
+    const targetBuffer = targetBufferLevelRef.current;
+    const isLive = isLiveRef.current;
+    
+    // Emergency threshold is normally 20% of target (12s for VOD, 1s for Live)
+    const emergencyThreshold = targetBuffer * 0.2;
+    
+    // Critical threshold is normally 30% of emergency (3.6s for VOD, 0.3s for Live)
+    // For live, we want to be even more lenient: 0.5s is usually the "hard" limit
+    const criticalThreshold = isLive 
+      ? Math.max(0.5, emergencyThreshold * 0.5) 
+      : emergencyThreshold * 0.3;
+
+    // Level 1: TRUE STALL - Buffer completely empty
+    if (bufferGap <= 0.1) {
+      return {
+        severity: "empty",
+        reason: "Buffer completely empty",
+      };
+    }
+
     // Level 2: CRITICAL STALL - Buffer dangerously low
-    if (bufferGap < BUFFER_EMERGENCY_THRESHOLD * 0.3) {
+    if (bufferGap < criticalThreshold) {
       return {
         severity: "critical",
-        reason: `Buffer critically low: ${bufferGap.toFixed(1)}s`,
+        reason: `Buffer critically low: ${bufferGap.toFixed(1)}s (threshold: ${criticalThreshold.toFixed(1)}s)`,
       };
     }
 
     // Level 3: LOW STALL - Buffer below emergency threshold
-    if (bufferGap < BUFFER_EMERGENCY_THRESHOLD) {
+    if (bufferGap < emergencyThreshold) {
       return {
         severity: "low",
-        reason: `Buffer low: ${bufferGap.toFixed(1)}s`,
+        reason: `Buffer low: ${bufferGap.toFixed(1)}s (threshold: ${emergencyThreshold.toFixed(1)}s)`,
       };
     }
 
     // Level 4: PREDICTED STALL - Based on buffer consumption rate
     const timeUntilStall = predictTimeUntilStall();
-    if (timeUntilStall !== null && timeUntilStall < 10) {
+    if (timeUntilStall !== null && timeUntilStall < (isLive ? 3 : 10)) {
       return {
         severity: "predicted",
         reason: `Stall predicted in ${timeUntilStall.toFixed(1)}s`,
@@ -360,7 +383,7 @@ export function usePlayerEventHandlers({
 
     // Level 5: BUFFER DECLINING RAPIDLY
     const consumptionRate = bufferConsumptionRef.current.consumptionRate;
-    if (consumptionRate > 1.5 && bufferGap < TARGET_BUFFER_LEVEL * 0.5) {
+    if (consumptionRate > 1.5 && bufferGap < targetBuffer * 0.5) {
       return {
         severity: "predicted",
         reason: `Buffer declining rapidly: ${consumptionRate.toFixed(

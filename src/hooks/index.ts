@@ -460,6 +460,7 @@ export function useGrpcPlayer({
     shouldFetchSegment: unifiedShouldFetchSegment,
     scheduleNextFetch,
     isLiveRef,
+    targetBufferLevelRef,
   });
 
   const { resetStreamForSeek } = useSeekHandler({

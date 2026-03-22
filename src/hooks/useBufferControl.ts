@@ -694,8 +694,8 @@ export function useBufferControl() {
       bufferStateRef.current.isGlobalStall = true;
     }
     // Level 2: EMERGENCY STALL - Buffer critically low
-    else if (combinedBufferAhead < BUFFER_EMERGENCY_THRESHOLD * 0.3) {
-      stallReason = "🚨 CRITICAL STALL: Buffer < 1.5s";
+    else if (combinedBufferAhead < (isLive ? 0.3 : 3.6)) {
+      stallReason = `🚨 CRITICAL STALL: Buffer < ${isLive ? '0.3s' : '3.6s'}`;
       shouldFetchAggressively = true;
     }
     // Level 3: PREDICTED STALL - Based on buffer trends

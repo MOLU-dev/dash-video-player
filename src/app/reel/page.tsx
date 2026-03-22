@@ -18,7 +18,7 @@ interface Video {
 }
 
 /**
- * 🔥 Custom video source with UNIQUE IDs
+ *  Custom video source with UNIQUE IDs
  */
 const CUSTOM_VIDEOS: Video[] = [
   {
@@ -88,7 +88,7 @@ export default function ReelsPage() {
   const [hasMore, setHasMore] = useState(true);
 
   /**
-   * 📦 Load videos from local array instead of API
+   * Load videos from local array instead of API
    */
   const loadVideos = useCallback(() => {
     if (loading || !hasMore) return;
@@ -114,7 +114,7 @@ export default function ReelsPage() {
   }, []);
 
   /**
-   * ❤️ Like handler (local state only)
+   * Like handler (local state only)
    */
   const handleLike = useCallback((videoId: string, isLiked: boolean) => {
     setVideos((prev) =>
@@ -131,14 +131,14 @@ export default function ReelsPage() {
   }, []);
 
   /**
-   * 💬 Comment handler
+   * Comment handler
    */
   const handleComment = useCallback((videoId: string) => {
     console.log("Open comments for:", videoId);
   }, []);
 
   /**
-   * 🔗 Share handler
+   * Share handler
    */
   const handleShare = useCallback(async (videoId: string) => {
     const url = `${window.location.origin}/reels/${videoId}`;
@@ -159,7 +159,7 @@ export default function ReelsPage() {
   }, []);
 
   /**
-   * ⏳ Initial loading screen
+   * Initial loading screen
    */
   if (videos.length === 0 && loading) {
     return (

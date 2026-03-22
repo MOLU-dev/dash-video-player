@@ -1,4 +1,4 @@
-import { useCallback } from "react";
+import { useCallback, useRef } from "react";
 import type {
   Representation,
   MediaType,
@@ -157,6 +157,10 @@ export function useSegmentFetching({
     videoId,
     prefetchMetadata
   );
+
+  // Track segment start times and sizes for throughput measurement
+  const segmentStartTimesRef = useRef<Map<number, number>>(new Map());
+  const segmentSizesRef = useRef<Map<number, number>>(new Map());
 
   const fetchAndAppend = useCallback(
     async (
@@ -676,6 +680,15 @@ export function useSegmentFetching({
           mediaType,
           signal: controller.signal,
           onChunkReceived: (data: Uint8Array, segNum: number, isLast: boolean) => {
+            // Track start time for throughput measurement
+            if (!segmentStartTimesRef.current.has(segNum)) {
+              segmentStartTimesRef.current.set(segNum, Date.now());
+              segmentSizesRef.current.set(segNum, 0);
+            }
+            
+            // accumulate bytes
+            segmentSizesRef.current.set(segNum, (segmentSizesRef.current.get(segNum) || 0) + data.length);
+
             // 1. Append the data chunk
             if (data && data.length > 0) {
               enqueueOperation(mediaType, () => {
@@ -683,7 +696,7 @@ export function useSegmentFetching({
                   sb,
                   data,
                   controller.signal,
-                  undefined, 
+                  segNum, 
                   mediaType,
                   pendingAppendsRef.current
                 );
@@ -692,11 +705,28 @@ export function useSegmentFetching({
 
             // 2. If this was the last chunk of a segment, update state
             if (isLast) {
+              const endTime = Date.now();
+              const startTime = segmentStartTimesRef.current.get(segNum);
+              const totalBytes = segmentSizesRef.current.get(segNum);
+
+              if (startTime && totalBytes) {
+                const duration = Math.max(1, endTime - startTime);
+                updateThroughputMeasurement(totalBytes, duration, mediaType);
+                
+                // Cleanup maps
+                segmentStartTimesRef.current.delete(segNum);
+                segmentSizesRef.current.delete(segNum);
+              }
+
               console.log(`[${mediaType}] Finished pushed segment ${segNum}`);
               nextSegRef.current = segNum + 1;
+              lastProcessedSegmentsRef.current.set(rep.id, segNum);
               
-              // We could trigger a manifest refresh here if needed, 
-              // but the persistent stream will keep pushing anyway.
+              if (mediaType === "video") {
+                lastVideoFetchTimeRef.current = Date.now();
+              } else {
+                lastAudioFetchTimeRef.current = Date.now();
+              }
             }
           },
           onEnd: () => {

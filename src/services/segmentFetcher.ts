@@ -16,6 +16,7 @@ export interface FetchSegmentOptions {
   mediaType: MediaType;
   signal?: AbortSignal;
   onProgress?: (bytes: number) => void;
+  startFromLiveEdge?: boolean;
 }
 
 /**
@@ -34,7 +35,7 @@ function getGeneratorEnum(generator?: GeneratorType): Generator {
 
 /**
  * Opens a persistent stream to the backend and pushes raw chunks to a callback.
- * Perfect for your Redis-backed push architecture.
+ 
  */
 export function streamLiveChunks({
   videoId,
@@ -91,8 +92,8 @@ export function streamLiveChunks({
 }
 
 /**
- * NEW: Uses the persistent StreamVideoLive RPC which pushes multiple segments
- * over a single connection. This is the "push" architecture requested.
+ *  Uses the persistent StreamVideoLive RPC which pushes multiple segments
+ * over a single connection. 
  */
 export function streamLivePersistent({
   videoId,
@@ -117,8 +118,11 @@ export function streamLivePersistent({
   req.setGenerator(getGeneratorEnum(rep.generator));
   req.setWaitForSegments(true); // Key for push architecture
   
-  // Optional: could add live edge support here
-  // req.setStartFromLiveEdge(false); 
+  if (options.startFromLiveEdge) {
+    req.setStartFromLiveEdge(true);
+  } else {
+    req.setStartFromLiveEdge(false);
+  }
 
   const call = grpcClient.streamVideoLive(req, {});
 

@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "geist": "^1.7.0",
     "grpc-web": "^2.0.2",
     "loglevel": "^1.9.2",
     "lucide-react": "^0.562.0",

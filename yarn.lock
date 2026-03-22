@@ -2380,6 +2380,15 @@ __metadata:
   languageName: node
   linkType: hard
 
+"geist@npm:^1.7.0":
+  version: 1.7.0
+  resolution: "geist@npm:1.7.0"
+  peerDependencies:
+    next: ">=13.2.0"
+  checksum: 10c0/adb3f11d3431ca259a8fbc97acf193ff40259dcf00abf1e9598e284c2d2ca9e982822cb840d668e62be0b65ad9ac164c112bf1fdaac1d0c213882ace96b149a2
+  languageName: node
+  linkType: hard
+
 "generator-function@npm:^2.0.0":
   version: 2.0.1
   resolution: "generator-function@npm:2.0.1"
@@ -4977,6 +4986,7 @@ __metadata:
     "@types/react-dom": "npm:^19"
     eslint: "npm:^9"
     eslint-config-next: "npm:15.5.4"
+    geist: "npm:^1.7.0"
     google-protobuf: "npm:^4.0.0"
     grpc-tools: "npm:^1.13.0"
     grpc-web: "npm:^2.0.2"
