@@ -531,6 +531,7 @@ export function ReelPlayer({
               creator={video.creator}
               creatorAvatar={video.creatorAvatar}
               isActive={index === activeIndex}
+              isLive={videoRepsMap.get(video.id)?.isLive || false}
               initialTime={savedState?.currentTime || 0}
               onStateChange={(state) =>
                 videoStatesRef.current.set(video.id, state)

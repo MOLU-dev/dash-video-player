@@ -302,7 +302,7 @@ export function CustomControls({
         onClick={handleProgressClick}
         onMouseDown={handleMouseDown}
         onTouchStart={handleTouchStart}
-        style={{ visibility: isLive ? "hidden" : "visible", pointerEvents: isLive ? "none" : "auto" }}
+        style={{ visibility: "visible", pointerEvents: "auto" }}
       >
         {/* Thumbnail Preview */}
         {spriteUrl && vttUrl && (
@@ -408,7 +408,7 @@ export function CustomControls({
                   <span className="live-dot" />
                   <span>LIVE</span>
                 </div>
-                 <span className="live-time">{formatTime(currentTime)}</span>
+                 <span className="live-time">{formatTime(currentTime)} / {formatTime(duration)}</span>
               </div>
             ) : (
               <>

@@ -382,7 +382,12 @@ export function VideoPlayer({
       }
     };
 
+    const handleDurationChange = () => {
+      setDuration(video.duration);
+    };
+
     video.addEventListener("timeupdate", handleTimeUpdate);
+    video.addEventListener("durationchange", handleDurationChange);
     video.addEventListener("loadedmetadata", handleLoadedMetadata);
     video.addEventListener("volumechange", handleVolumeChange);
     video.addEventListener("ratechange", handleRateChange);
@@ -393,6 +398,7 @@ export function VideoPlayer({
 
     return () => {
       video.removeEventListener("timeupdate", handleTimeUpdate);
+      video.removeEventListener("durationchange", handleDurationChange);
       video.removeEventListener("loadedmetadata", handleLoadedMetadata);
       video.removeEventListener("volumechange", handleVolumeChange);
       video.removeEventListener("ratechange", handleRateChange);

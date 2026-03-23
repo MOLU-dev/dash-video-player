@@ -316,11 +316,11 @@ export function usePlayerInitializer({
                 const liveTime = vidMaxSeg * segDur;
                 
                 // Start 3 segments back from live edge
-                initialSeekTime = Math.max(0, liveTime - (segDur * 3));
+                initialSeekTime = Math.max(0, liveTime - segDur);
                 videoStartSegment = Math.max(chosenVideo.startNumber, vidMaxSeg - 2);
                 audioStartSegment = Math.max(chosenAudio.startNumber, (chosenAudio.startNumber + chosenAudio.totalSegments - 1) - 2);
                 
-                console.log(`[INIT] Live stream: edge ${liveTime}s, starting at ${initialSeekTime}s`);
+                console.log(`[INIT] Live stream: edge ${liveTime}s, starting at ${initialSeekTime}s (LIVE EDGE)`);
               }
            } else if (initialSeekTime > 0) {
              console.log(`[INIT] Seeking to position: ${initialSeekTime}s`);

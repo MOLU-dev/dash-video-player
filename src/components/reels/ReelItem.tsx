@@ -19,6 +19,7 @@ interface ReelItemProps {
   likeCount?: number;
   commentCount?: number;
   isLiked?: boolean;
+  isLive?: boolean;
 }
 
 export function ReelItem({
@@ -35,6 +36,7 @@ export function ReelItem({
   likeCount = 0,
   commentCount = 0,
   isLiked: initialIsLiked = false,
+  isLive = false,
 }: ReelItemProps) {
   const [isLiked, setIsLiked] = useState(initialIsLiked);
   const [showLikeAnimation, setShowLikeAnimation] = useState(false);
@@ -121,6 +123,16 @@ export function ReelItem({
           </div>
         )}
       </div>
+
+      {isLive && (
+        <div className="live-restriction-overlay">
+          <div className="restriction-content">
+            <VolumeX size={48} />
+            <h2>Live Video Not Supported</h2>
+            <p>This live stream cannot be played as a Reel.</p>
+          </div>
+        </div>
+      )}
 
       <div className="gradient-overlay" />
 
@@ -472,6 +484,37 @@ export function ReelItem({
           .action-btn {
             padding: 6px;
           }
+        }
+
+        .live-restriction-overlay {
+          position: absolute;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.9);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          z-index: 1000;
+          color: white;
+          text-align: center;
+          padding: 20px;
+        }
+
+        .restriction-content {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 16px;
+        }
+
+        .restriction-content h2 {
+          font-size: 20px;
+          margin: 0;
+        }
+
+        .restriction-content p {
+          font-size: 14px;
+          opacity: 0.8;
+          margin: 0;
         }
       `}</style>
     </div>

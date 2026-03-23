@@ -12,7 +12,7 @@ interface UseReelManifestLoaderProps {
 export function useReelManifestLoader({ videoIds }: UseReelManifestLoaderProps) {
   const [manifestsLoaded, setManifestsLoaded] = useState(false);
   const videoRepsMapRef = useRef(
-    new Map<string, { video: Representation[]; audio: Representation[] }>()
+    new Map<string, { video: Representation[]; audio: Representation[]; isLive: boolean }>()
   );
 
   useEffect(() => {
@@ -36,11 +36,12 @@ export function useReelManifestLoader({ videoIds }: UseReelManifestLoaderProps) 
               }
 
               const mpdXml = rsp.getMpdXml_asU8();
-              const { videoReps, audioReps } = parseManifest(mpdXml);
+              const { videoReps, audioReps, isLive } = parseManifest(mpdXml);
 
               videoRepsMapRef.current.set(videoId, {
                 video: videoReps,
                 audio: audioReps,
+                isLive,
               });
 
               resolve();
